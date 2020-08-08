@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	dblayer "yun-storage/db"
 	"yun-storage/meta"
 	"yun-storage/util"
 )
@@ -57,6 +58,14 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		// TODO: 处理异常情况，比如跳转到一个上传失败页面
 		_ = meta.UpdateFileMetaDB(fileMeta)
 
+		r.ParseForm()
+		username := r.Form.Get("username")
+		suc := dblayer.OnUserFileUploadFinished(username, fileMeta.FileSha1, fileMeta.FileName, fileMeta.FileSize)
+		if suc {
+			http.Redirect(w, r, "/static/view/home.html", http.StatusFound)
+		} else {
+			w.Write([]byte("Upload Failed."))
+		}
 		http.Redirect(w, r, "/file/upload/suc", http.StatusFound)
 	}
 }
@@ -90,15 +99,18 @@ func FileQueryHandler(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 
 	limitCnt, _ := strconv.Atoi(r.Form.Get("limit"))
+	username := r.Form.Get("username")
 	// 从数据库中获取批量文件信息
-	fileMetas, err := meta.GetLastFileMetasDB(limitCnt)
+	// fileMetas, err := meta.GetLastFileMetasDB(limitCnt)
+	userFiles, err := dblayer.QueryUserFileMetas(username, limitCnt)
 	if err != nil {
+		fmt.Println(err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	// 封装为json格式返回给客户端
-	data, err := json.Marshal(fileMetas)
+	data, err := json.Marshal(userFiles)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -199,4 +211,48 @@ func FileDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// 尝试秒传
+func TryFastUploadHandler(w http.ResponseWriter, r *http.Request) {
+	// 解析请求参数
+	r.ParseForm()
+	username := r.Form.Get("username")
+	filehash := r.Form.Get("filehash")
+	filename := r.Form.Get("filename")
+	filesize, _ := strconv.Atoi(r.Form.Get("filesize"))
+
+	// 从文件表中查询相同hash的文件信息
+	fileMeta, err := meta.GetFileMetaDB(filehash)
+	if err != nil {
+		fmt.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// 查不到信息返回秒传失败
+	if fileMeta.FileSha1 == "" {
+		resp := util.RespMsg{
+			Code: -1,
+			Msg:  "秒传失败， 请访问普通上传接口",
+		}
+		w.Write(resp.JSONBytes())
+		return
+	}
+	// 如果存在相同文件则返回成功
+	suc := dblayer.OnUserFileUploadFinished(username, filehash, filename, int64(filesize))
+	if suc {
+		resp := util.RespMsg{
+			Code: 0,
+			Msg:  "秒传成功",
+		}
+		w.Write(resp.JSONBytes())
+		return
+	}
+	resp := util.RespMsg{
+		Code: -2,
+		Msg:  "秒传失败，请稍后重试",
+	}
+	w.Write(resp.JSONBytes())
+	return
 }
